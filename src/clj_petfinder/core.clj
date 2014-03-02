@@ -38,7 +38,7 @@
   ([creds path]
      (signed-api-call creds path nil))
   ([{:keys [api-key api-secret] :as creds} path params]
-     (let [query-params (into {:key *api-key*} params)
+     (let [query-params (into {:key api-key} params)
            param-str (join "&" (map #(str (name (first %)) "=" (second %)) query-params))
            sig (md5 (str api-secret param-str))]
        (api-call creds path (into params {:sig sig})))))
