@@ -9,6 +9,11 @@
             [clj-http.client :as http]
             [clojure.data.zip.xml :as zf]))
 
+(defn- log
+  "Simplest logging utility possible"
+  [arg]
+   (println arg)
+   arg)
 
 (def ^:private base-url "http://api.petfinder.com/")
 
@@ -24,7 +29,7 @@
      (let [query-params (into {:key api-key} params)
            xml-resp (-> (http/get (url-for path) {:query-params query-params})
                         :body
-                        log
+                        ;log ;; TODO: add a better way to put this library into logging mode
                         .getBytes
                         java.io.ByteArrayInputStream.
                         xml/parse
