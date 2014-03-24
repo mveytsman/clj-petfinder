@@ -3,10 +3,11 @@
         [clojure.string :only [join]]
         [clojure.set :only [rename-keys]]
         [slingshot.slingshot :only [throw+]]
-        [digest :only [md5]]) 
+        [digest :only [md5]])
   (:require [clojure.xml :as xml]
             [clojure.zip :as zip]
-            [clj-http.client :as http]))
+            [clj-http.client :as http]
+            [clojure.data.zip.xml :as zf]))
 
 
 (def ^:private base-url "http://api.petfinder.com/")
@@ -23,6 +24,7 @@
      (let [query-params (into {:key api-key} params)
            xml-resp (-> (http/get (url-for path) {:query-params query-params})
                         :body
+                        log
                         .getBytes
                         java.io.ByteArrayInputStream.
                         xml/parse
@@ -43,50 +45,38 @@
            sig (md5 (str api-secret param-str))]
        (api-call creds path (into params {:sig sig})))))
 
-(defn- pet->map
-  "Returns a map constructed from a pet xml record."
-  [pet]
-  ;; I should find a less ugly way of doing this 
-  {:id (xml1-> pet :id text)
-   :shelter-id (xml1-> pet :shelterId text)
-   :shelter-pet-id (xml1-> pet :shelterPetId text)
-   :name (xml1-> pet :name text)
-   :animal (xml1-> pet :animal text)
-   :breeds (xml-> pet :breeds :breed text)
-   :mix (xml1-> pet :mix text)
-   :age (xml1-> pet :age text)
-   :sex (xml1-> pet :sex text)
-   :size (xml1-> pet :size text)
-   :options (xml-> pet :options :option text)
-   :description (xml1-> pet :description text)
-   :last-update (xml1-> pet :lastUpdate text)
-   :media {:photos (xml-> pet :media :photos :photo text)}
-   :contact {:address1 (xml1-> pet :contact :address1 text)
-             :address2 (xml1-> pet :contact :address2 text)
-             :city (xml1-> pet :contact :city text)
-             :state (xml1-> pet :contact :state text)
-             :zip (xml1-> pet :contant :zip text)
-             :fax (xml1-> pet :contact :fax text)
-             :email (xml1-> pet :contact :email text)}})
+(defn- xml->map-helper
+  "Helper that recursively parses an XML zipper from the Petfinder API and transforms it into a map"
+  [zipper]
+  (loop [loc zipper
+         result {}]
+    (if (not loc) 
+      result
+      (let [tag (:tag (zip/node loc))
+            child (zip/down loc)]
+        (cond (nil? child)
+              (recur (zip/right loc) (assoc result tag nil))
 
-(defn- shelter->map
-  "Returns a map constructed from a shelter xml record."
-  [shelter]
-  {:id (xml1-> shelter :id text)
-   :name (xml1-> shelter :name text)
-   :address1 (xml1-> shelter :address1 text)
-   :address2 (xml1-> shelter :address2 text)
-   :city (xml1-> shelter :city text)
-   :state (xml1-> shelter :state text)
-   :zip (xml1-> shelter :zip text)
-   :country (xml1-> shelter :country text)
-   :latitude (xml1-> shelter :latitude text)
-   :longitude (xml1-> shelter :longitude text)
-   :phone (xml1-> shelter :phone text)
-   :fax (xml1-> shelter :contact :fax text)
-   :email (xml1-> shelter :contact :email text)
-   })
+              ;; We have to parse the photo tag to include id and size
+              (= tag :photo)
+              (let [attrs (:attrs (zip/node loc))
+                    id (Integer/parseInt (:id attrs))
+                    size (:size attrs)
+                    url (zip/node child)]
+                (recur (zip/right loc) (assoc-in result [id size] url)))
+              
+              (zip/branch? child)
+              (recur (zip/right loc) (assoc result tag (xml->map-helper child)))
 
+              :else
+              (recur (zip/right loc) (assoc result tag (zip/node child))))))))
+
+(defn- xml->map
+  "Returns a map from Petfinder XML."
+  [zipper]
+  ;;We can throw away the outer key returned by the helper (i.e. it's {:pet {:data :structure :we :need}})
+  (vals (xml->map-helper zipper)))
+  
 (defn token
   "Returns a token valid for a timed session (usually 60 minutes)."
   [creds]
@@ -104,7 +94,9 @@
   [creds id]
   (xml1-> (api-call creds "pet.get" {:id id})
           :pet
-          pet->map))
+          xml->map
+                                        ;pet->map
+          ))
 
 ;; I found that that the output=basic parameter returns the same
 ;; result as output=full. Considering the petfinder API has this bug,
@@ -127,7 +119,7 @@
            params (rename-keys params {:shelter-id :shelterid})] ;API expects param to be without hyphen or capitalization)
        (xml1-> (api-call creds "pet.getRandom" params)
                :pet
-               pet->map))))
+               xml->map))))
 
 (defn find-pets
   "Searches for pets according to the criteria you provde and returns
@@ -144,7 +136,7 @@
     :breed     => breed of animal (use breeds.list for a list of valid breeds)
     :size      => size of animal (S=small, M=medium, L=large, XL=extra-large)
     :sex       => M=male, F=female
-    
+
     :age       => age of the animal (Baby, Young, Adult, Senior)
     :offset    => set this to the value of lastOffset returned by a
                   previous call to pet.find, and it will retrieve the
@@ -153,22 +145,22 @@
                   call (default is 25)"
 
   ([creds location] (find-pets creds location {}))
-  ([creds location params] 
+  ([creds location params]
      (let [params (into {:location location :output "full"} params)] ;full output by default
        (xml-> (api-call creds "pet.find" params)
               :pets
               :pet
-              pet->map))))
+              xml->map))))
 
 (defn shelter
   "Returns a record for a single shelter"
   [creds id]
   (xml1-> (api-call creds "shelter.get" {:id id})
-          :shelter
-          shelter->map))
+         :shelter
+         xml->map))
 
 (defn find-shelters
-  "Returns a collection of shelter records near 'location'. 
+  "Returns a collection of shelter records near 'location'.
 
   Optional params are:
     :name      => full or partial shelter name
@@ -183,7 +175,7 @@
        (xml-> (api-call creds "shelter.find" params)
               :shelters
               :shelter
-              shelter->map))))
+              xml->map))))
 
 (defn find-shelters-by-breed
   "Optional params are:
@@ -198,7 +190,7 @@
        (xml-> (api-call creds "shelter.listByBreed" params)
               :shelters
               :shelter
-              shelter->map))))
+              xml->map))))
 
 (defn shelter-pets
   "Returns a collection of pet records in a given shelter.
@@ -216,4 +208,4 @@
        (xml-> (api-call creds "shelter.getPets" params)
               :pets
               :pet
-              pet->map))))
+              xml->map))))
